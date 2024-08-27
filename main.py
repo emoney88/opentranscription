@@ -1,44 +1,63 @@
-# main.py
+from dotenv import load_dotenv
+import os
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse
 from transformers import pipeline
 import torch
 import torchaudio
 import whisper
-import os
-from io import BytesIO
 import html
+import time
 
-# Initialize FastAPI app
-app = FastAPI()
+# Load environment variables from .env file
+load_dotenv()
 
-# Load Whisper model for transcription
-whisper_model = whisper.load_model("large-v2")
+# Access the variables using os.getenv
+whisper_model_name = os.getenv("WHISPER_MODEL", "large-v2")
+torch_device = os.getenv("TORCH_DEVICE", "cuda")
+
+# Load Whisper model with environment settings
+whisper_model = whisper.load_model(whisper_model_name).to(torch_device)
 
 # Load sentiment analysis pipeline
-sentiment_pipeline = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
+sentiment_pipeline = pipeline("sentiment-analysis", model="distilbert/distilbert-base-uncased-finetuned-sst-2-english")
 
 # Load NER pipeline
 ner_pipeline = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english")
 
+# Initialize FastAPI app
+app = FastAPI()
+
 # Function to perform transcription
 def transcribe_audio(file_path):
+    start_time = time.time()
     result = whisper_model.transcribe(file_path)
-    return result['text'], result['segments']
+    end_time = time.time()
+    processing_time = end_time - start_time
+    transcription = result['text']
+    return transcription, processing_time
 
 # Function to analyze sentiment
 def analyze_sentiment(text):
+    start_time = time.time()
     result = sentiment_pipeline(text)[0]
-    return result['label'], result['score']
+    end_time = time.time()
+    processing_time = end_time - start_time
+    sentiment = result['label']
+    score = result['score']
+    return sentiment, score, processing_time
 
 # Function to perform NER
 def perform_ner(text):
+    start_time = time.time()
     result = ner_pipeline(text)
+    end_time = time.time()
+    processing_time = end_time - start_time
     entities = [entity['word'] for entity in result if entity['entity'] == 'B-PER']
-    return entities
+    return entities, processing_time
 
 # Function to generate HTML response
-def generate_html(transcription, sentiment, score, entities, segments):
+def generate_html(transcription, sentiment, score, entities, segments, times):
     html_content = f"""
     <!doctype html>
     <html lang="en">
@@ -66,7 +85,7 @@ def generate_html(transcription, sentiment, score, entities, segments):
                 </tr>
             </thead>
             <tbody>
-    """
+        """
     for segment in segments:
         html_content += f"""
                 <tr>
@@ -75,9 +94,13 @@ def generate_html(transcription, sentiment, score, entities, segments):
                     <td>{html.escape(segment['text'])}</td>
                 </tr>
         """
-    html_content += """
+    html_content += f"""
             </tbody>
         </table>
+        <h2>Processing Times</h2>
+        <p>Transcription Time: {times['transcription_time']:.2f} seconds</p>
+        <p>Sentiment Analysis Time: {times['sentiment_time']:.2f} seconds</p>
+        <p>NER Time: {times['ner_time']:.2f} seconds</p>
     </body>
     </html>
     """
@@ -89,19 +112,25 @@ async def transcribe(file: UploadFile = File(...)):
     try:
         with open(file_path, "wb") as f:
             f.write(await file.read())
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
 
-    try:
-        # Perform transcription
-        transcription, segments = transcribe_audio(file_path)
-        # Perform sentiment analysis
-        sentiment, score = analyze_sentiment(transcription)
-        # Perform named entity recognition
-        entities = perform_ner(transcription)
+        # Transcription
+        transcription, transcription_time = transcribe_audio(file_path)
+
+        # Sentiment Analysis
+        sentiment, score, sentiment_time = analyze_sentiment(transcription)
+
+        # Named Entity Recognition
+        entities, ner_time = perform_ner(transcription)
+
+        # Compile the processing times
+        times = {
+            "transcription_time": transcription_time,
+            "sentiment_time": sentiment_time,
+            "ner_time": ner_time
+        }
 
         # Generate HTML response
-        html_response = generate_html(transcription, sentiment, score, entities, segments)
+        html_response = generate_html(transcription, sentiment, score, entities, [], times)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process audio: {str(e)}")
     finally:
